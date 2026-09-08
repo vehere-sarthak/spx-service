@@ -64,8 +64,8 @@ async function issueFullSession(reply: Response, user: any) {
     nowEpochSec(),
   ]);
   const payload = userPayload(user);
-  const res = reply; void reply.json({ ok: true, session_key, user: payload, next: "ok" });
-  setSessionCookie(res, {
+  // Cookie before body — Express cannot add headers once the body is sent.
+  setSessionCookie(reply, {
     session_key,
     user_id: user.user_id,
     role_id: user.role_id,
@@ -73,19 +73,18 @@ async function issueFullSession(reply: Response, user: any) {
     permissions: payload.permissions,
     exp: nowEpochSec() + 12 * 3600,
   });
-  return res;
+  return reply.json({ ok: true, session_key, user: payload, next: "ok" });
 }
 
 function challengeResponse(reply: Response, user_id: string, next: string, ttl = 600) {
   const challenge = newSessionKey(user_id);
-  const res = reply; void reply.json({ ok: true, statusCode: 303, next, challenge, user_id });
-  setSessionCookie(res, {
+  setSessionCookie(reply, {
     session_key: challenge,
     user_id,
     permissions: [],
     exp: nowEpochSec() + ttl,
   });
-  return res;
+  return reply.json({ ok: true, statusCode: 303, next, challenge, user_id });
 }
 
 router.post("/", asyncHandler(async (req, reply) => {
@@ -187,14 +186,7 @@ router.post("/", asyncHandler(async (req, reply) => {
         nowEpochSec(),
       ]);
       const payload = userPayload(user);
-      const res = reply; void reply.json({
-        ok: true,
-        session_key,
-        user: payload,
-        next: "ok",
-        recoveryCodes,
-      });
-      setSessionCookie(res, {
+      setSessionCookie(reply, {
         session_key,
         user_id,
         role_id: user.role_id,
@@ -202,7 +194,13 @@ router.post("/", asyncHandler(async (req, reply) => {
         permissions: payload.permissions,
         exp: nowEpochSec() + 12 * 3600,
       });
-      return res;
+      return reply.json({
+        ok: true,
+        session_key,
+        user: payload,
+        next: "ok",
+        recoveryCodes,
+      });
     }
 
     if (action === "totp-validate") {
@@ -278,9 +276,8 @@ router.post("/", asyncHandler(async (req, reply) => {
       if (sess?.session_key) {
         await sqlExec(`DELETE FROM user_session WHERE session_key=?`, [sess.session_key]).catch(() => null);
       }
-      const res = reply; void reply.json({ ok: true });
-      clearSessionCookie(res);
-      return res;
+      clearSessionCookie(reply);
+      return reply.json({ ok: true });
     }
 
     if (action === "me") {
