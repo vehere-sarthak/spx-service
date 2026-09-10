@@ -8,6 +8,7 @@ import cookieParser from 'cookie-parser';
 
 import CORS from '../middlewares/CORS';
 import SecurityHeaders from '../middlewares/SecurityHeaders';
+import requireSession from '../middlewares/RequireSession';
 import ErrorHandlerService from '../errors/ErrorHandlerService';
 import ApiError from '../errors/ApiError';
 import ConfigService from './ConfigService';
@@ -52,8 +53,10 @@ export class Server {
 
     this.app.use('/public', express.static(path.join(process.cwd(), 'public')));
 
-    // Route endpoints mounted under the API prefix
-    this.app.use(this.apiPrefix, this.routes);
+    // Route endpoints mounted under the API prefix. The session gate sits in
+    // front of them, so a route is protected by default and has to be named in
+    // RequireSession's allowlist to be reachable without logging in.
+    this.app.use(this.apiPrefix, requireSession, this.routes);
 
     // Error handlers, last
     const errorHandlerService = new ErrorHandlerService();

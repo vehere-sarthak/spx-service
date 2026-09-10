@@ -14,6 +14,23 @@ export type SessionPayload = {
   role_id?: number;
   role_name?: string;
   permissions: string[];
+  /** Landing route id, so spx-ui's middleware can redirect without a round trip. */
+  landingPage?: string;
+  exp: number; // unix sec
+};
+
+/**
+ * Half-authenticated states (password accepted, MFA or a forced reset still
+ * outstanding) get their OWN cookie — the same split uiServices keeps between
+ * `vhr` and `auth`. Sharing one cookie meant a caller who had only passed the
+ * password step carried something any presence check would read as a session.
+ */
+export type ChallengePurpose = 'reset-password' | 'totp-challenge' | 'totp-setup';
+
+export type ChallengePayload = {
+  session_key: string;
+  user_id: string;
+  purpose: ChallengePurpose;
   exp: number; // unix sec
 };
 
@@ -21,12 +38,12 @@ function sign(data: string) {
   return createHmac('sha256', getSessionSecret()).update(data).digest('base64url');
 }
 
-export function encodeSession(payload: SessionPayload): string {
+export function encodeSession(payload: SessionPayload | ChallengePayload): string {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
   return `${body}.${sign(body)}`;
 }
 
-export function decodeSession(token?: string | null): SessionPayload | null {
+function decodeSigned<T extends { exp?: number }>(token?: string | null): T | null {
   if (!token) return null;
   const [body, sig] = token.split('.');
   if (!body || !sig) return null;
@@ -39,14 +56,20 @@ export function decodeSession(token?: string | null): SessionPayload | null {
     return null;
   }
   try {
-    const payload = JSON.parse(
-      Buffer.from(body, 'base64url').toString('utf8')
-    ) as SessionPayload;
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as T;
     if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) return null;
     return payload;
   } catch {
     return null;
   }
+}
+
+export function decodeSession(token?: string | null): SessionPayload | null {
+  const payload = decodeSigned<SessionPayload & { purpose?: string }>(token);
+  // A mid-login challenge token is signed with the same key; it must never be
+  // accepted where a completed session is required.
+  if (!payload || payload.purpose) return null;
+  return payload;
 }
 
 /** Cookie first; `vhr` header covers the window before the browser commits it. */
@@ -82,6 +105,40 @@ export function clearSessionCookie(res: Response) {
     path: '/',
     maxAge: 0,
   });
+}
+
+export function getChallengeCookieName(): string {
+  return `${getSessionCookieName()}_auth`;
+}
+
+export function setChallengeCookie(res: Response, payload: ChallengePayload) {
+  const ttlMs = Math.max(1000, (payload.exp - Math.floor(Date.now() / 1000)) * 1000);
+  res.cookie(getChallengeCookieName(), encodeSession(payload), {
+    httpOnly: true,
+    sameSite: 'none',
+    secure: true,
+    path: '/',
+    maxAge: ttlMs,
+  });
+}
+
+export function clearChallengeCookie(res: Response) {
+  res.cookie(getChallengeCookieName(), '', {
+    httpOnly: true,
+    sameSite: 'none',
+    secure: true,
+    path: '/',
+    maxAge: 0,
+  });
+}
+
+/** The mid-login token: proves the password step passed, and nothing more. */
+export function challengeFromRequest(req: Request): ChallengePayload | null {
+  const fromCookie = (req as any).cookies?.[getChallengeCookieName()];
+  const header = req.headers['x-spiderx-auth'];
+  const raw = fromCookie || (Array.isArray(header) ? header[0] : header);
+  const payload = decodeSigned<ChallengePayload>(raw);
+  return payload && payload.purpose ? payload : null;
 }
 
 export function newSessionKey(user_id: string) {

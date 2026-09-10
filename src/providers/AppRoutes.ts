@@ -20,6 +20,7 @@ import SpxmanagementRoutes from '../routes/SpxmanagementRoutes';
 import SpxActionRoutes from '../routes/SpxActionRoutes';
 import TargetmanagementsRoutes from '../routes/TargetmanagementsRoutes';
 import TargetSubRoutes from '../routes/TargetSubRoutes';
+import NdrFabricRoutes from '../routes/NdrFabricRoutes';
 import CatchAllRoutes from '../routes/CatchAllRoutes';
 
 /**
@@ -49,6 +50,8 @@ class AppRoutesProvider {
     router.use('/capture-input-identification', CaptureinputidentificationRoutes);
     router.use('/link-monitoring/bulk-import-pb-links', LinkmonitoringBulkimportpblinksRoutes);
     router.use('/dashboard/cms/soi/overview', DashboardCmsSoiOverviewRoutes);
+
+    router.use('/ndr/fabric', NdrFabricRoutes);
 
     router.use('/spx-management/:id', SpxActionRoutes);
     router.use('/spx-management', SpxmanagementRoutes);

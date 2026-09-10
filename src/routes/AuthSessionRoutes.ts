@@ -20,10 +20,14 @@ import {
   verifyTotp,
 } from "../lib/totp";
 import {
+  challengeFromRequest,
+  clearChallengeCookie,
   clearSessionCookie,
   newSessionKey,
   sessionFromRequest,
+  setChallengeCookie,
   setSessionCookie,
+  type ChallengePurpose,
 } from "../lib/session-cookie";
 import { parsePermissions } from "../lib/permissions";
 
@@ -71,20 +75,44 @@ async function issueFullSession(reply: Response, user: any) {
     role_id: user.role_id,
     role_name: user.role_name,
     permissions: payload.permissions,
+    landingPage: payload.landingPage,
     exp: nowEpochSec() + 12 * 3600,
   });
+  // The mid-login token has done its job; leaving it set would let a stale
+  // challenge outlive the login it belonged to.
+  clearChallengeCookie(reply);
   return reply.json({ ok: true, session_key, user: payload, next: "ok" });
 }
 
-function challengeResponse(reply: Response, user_id: string, next: string, ttl = 600) {
+function challengeResponse(
+  reply: Response,
+  user_id: string,
+  next: ChallengePurpose,
+  ttl = 600
+) {
   const challenge = newSessionKey(user_id);
-  setSessionCookie(reply, {
+  setChallengeCookie(reply, {
     session_key: challenge,
     user_id,
-    permissions: [],
+    purpose: next,
     exp: nowEpochSec() + ttl,
   });
+  // No session cookie here: the password step alone must not look logged in.
+  clearSessionCookie(reply);
   return reply.json({ ok: true, statusCode: 303, next, challenge, user_id });
+}
+
+/**
+ * Who the caller is mid-login. A completed session also counts, so re-enrolling
+ * TOTP from inside the app keeps working; the client-supplied `user_id` is only
+ * a fallback and never on its own grounds to act.
+ */
+function actorFor(req: any, purpose: ChallengePurpose): string | null {
+  const ch = challengeFromRequest(req);
+  if (ch && ch.purpose === purpose) return ch.user_id;
+  const sess = sessionFromRequest(req);
+  if (sess?.user_id) return sess.user_id;
+  return null;
 }
 
 router.post("/", asyncHandler(async (req, reply) => {
@@ -116,9 +144,11 @@ router.post("/", asyncHandler(async (req, reply) => {
     }
 
     if (action === "reset-password") {
-      const sess = sessionFromRequest(req);
-      const user_id = sess?.user_id || String(body.user_id || "");
+      const user_id = actorFor(req, "reset-password");
       const old_pass = String(body.old_pass || "");
+      if (!user_id) {
+        return reply.status(401).json({ error: "Sign in again to reset your password" });
+      }
       const new_pass = String(body.new_pass || "");
       if (!user_id || !new_pass) {
         return reply.status(400).json({ error: "user_id and new_pass required" });
@@ -136,8 +166,7 @@ router.post("/", asyncHandler(async (req, reply) => {
     }
 
     if (action === "totp-setup-generate") {
-      const sess = sessionFromRequest(req);
-      const user_id = sess?.user_id || String(body.user_id || "");
+      const user_id = actorFor(req, "totp-setup");
       if (!user_id) return reply.status(401).json({ error: "not authenticated" });
       const secret = generateTotpSecret();
       const otpauth = totpUri(secret, user_id);
@@ -151,12 +180,12 @@ router.post("/", asyncHandler(async (req, reply) => {
     }
 
     if (action === "totp-setup-verify") {
-      const sess = sessionFromRequest(req);
-      const user_id = sess?.user_id || String(body.user_id || "");
+      const user_id = actorFor(req, "totp-setup");
       const secret = String(body.secret || "");
       const token = String(body.token || "");
-      if (!user_id || !secret || !token) {
-        return reply.status(400).json({ error: "user_id, secret, token required" });
+      if (!user_id) return reply.status(401).json({ error: "not authenticated" });
+      if (!secret || !token) {
+        return reply.status(400).json({ error: "secret and token required" });
       }
       if (!verifyTotp(token, secret)) {
         return reply.status(401).json({ error: "Invalid authenticator code" });
@@ -192,8 +221,10 @@ router.post("/", asyncHandler(async (req, reply) => {
         role_id: user.role_id,
         role_name: user.role_name,
         permissions: payload.permissions,
+        landingPage: payload.landingPage,
         exp: nowEpochSec() + 12 * 3600,
       });
+      clearChallengeCookie(reply);
       return reply.json({
         ok: true,
         session_key,
@@ -204,9 +235,13 @@ router.post("/", asyncHandler(async (req, reply) => {
     }
 
     if (action === "totp-validate") {
-      const sess = sessionFromRequest(req);
-      const user_id = sess?.user_id || String(body.user_id || "");
+      // Must come from the cookie: the password step is what earns the right to
+      // present a second factor, so a bare user_id in the body is not enough.
+      const user_id = actorFor(req, "totp-challenge");
       const token = String(body.token || "").trim();
+      if (!user_id) {
+        return reply.status(401).json({ error: "Sign in again" });
+      }
       const recoveryCode = String(body.recoveryCode || "").trim();
       if (!user_id || (!token && !recoveryCode)) {
         return reply.status(400).json({ error: "token or recoveryCode required" });
@@ -277,6 +312,7 @@ router.post("/", asyncHandler(async (req, reply) => {
         await sqlExec(`DELETE FROM user_session WHERE session_key=?`, [sess.session_key]).catch(() => null);
       }
       clearSessionCookie(reply);
+      clearChallengeCookie(reply);
       return reply.json({ ok: true });
     }
 
