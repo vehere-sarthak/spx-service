@@ -50,6 +50,19 @@ export function getSessionSecret(): string {
   );
 }
 
+/**
+ * Half-authenticated challenge cookies (password done, MFA/reset outstanding)
+ * are signed with their own key, mirroring uiServices' auth_jwt_secret. Falls
+ * back to the session secret so an appliance that has not set one still works.
+ */
+export function getAuthSecret(): string {
+  return (
+    process.env.SPIDERX_AUTH_SECRET ||
+    ((getAppConfig().auth as any)?.auth_jwt_secret as string) ||
+    getSessionSecret()
+  );
+}
+
 export function getSessionMaxAgeSec(): number {
   return Number((getAppConfig().auth as any)?.session_cookie_expiresIn_sec || 43200);
 }

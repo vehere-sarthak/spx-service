@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { md5 } from './api-utils';
 import {
+  getAuthSecret,
   getSessionCookieName,
   getSessionMaxAgeSec,
   getSessionSecret,
@@ -34,20 +35,33 @@ export type ChallengePayload = {
   exp: number; // unix sec
 };
 
-function sign(data: string) {
-  return createHmac('sha256', getSessionSecret()).update(data).digest('base64url');
+function sign(data: string, secret: string) {
+  return createHmac('sha256', secret).update(data).digest('base64url');
 }
 
-export function encodeSession(payload: SessionPayload | ChallengePayload): string {
+function encodeWith(payload: SessionPayload | ChallengePayload, secret: string): string {
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  return `${body}.${sign(body)}`;
+  return `${body}.${sign(body, secret)}`;
 }
 
-function decodeSigned<T extends { exp?: number }>(token?: string | null): T | null {
+/** A completed session, signed with the session key. */
+export function encodeSession(payload: SessionPayload): string {
+  return encodeWith(payload, getSessionSecret());
+}
+
+/** A half-authenticated challenge, signed with the separate auth key. */
+export function encodeChallenge(payload: ChallengePayload): string {
+  return encodeWith(payload, getAuthSecret());
+}
+
+function decodeSigned<T extends { exp?: number }>(
+  token: string | null | undefined,
+  secret: string
+): T | null {
   if (!token) return null;
   const [body, sig] = token.split('.');
   if (!body || !sig) return null;
-  const expected = sign(body);
+  const expected = sign(body, secret);
   try {
     const a = Buffer.from(sig);
     const b = Buffer.from(expected);
@@ -65,9 +79,9 @@ function decodeSigned<T extends { exp?: number }>(token?: string | null): T | nu
 }
 
 export function decodeSession(token?: string | null): SessionPayload | null {
-  const payload = decodeSigned<SessionPayload & { purpose?: string }>(token);
-  // A mid-login challenge token is signed with the same key; it must never be
-  // accepted where a completed session is required.
+  const payload = decodeSigned<SessionPayload & { purpose?: string }>(token, getSessionSecret());
+  // A challenge token now carries a different signature, so it cannot verify
+  // here at all. The purpose check stays as defence in depth.
   if (!payload || payload.purpose) return null;
   return payload;
 }
@@ -113,7 +127,7 @@ export function getChallengeCookieName(): string {
 
 export function setChallengeCookie(res: Response, payload: ChallengePayload) {
   const ttlMs = Math.max(1000, (payload.exp - Math.floor(Date.now() / 1000)) * 1000);
-  res.cookie(getChallengeCookieName(), encodeSession(payload), {
+  res.cookie(getChallengeCookieName(), encodeChallenge(payload), {
     httpOnly: true,
     sameSite: 'none',
     secure: true,
@@ -137,7 +151,7 @@ export function challengeFromRequest(req: Request): ChallengePayload | null {
   const fromCookie = (req as any).cookies?.[getChallengeCookieName()];
   const header = req.headers['x-spiderx-auth'];
   const raw = fromCookie || (Array.isArray(header) ? header[0] : header);
-  const payload = decodeSigned<ChallengePayload>(raw);
+  const payload = decodeSigned<ChallengePayload>(raw, getAuthSecret());
   return payload && payload.purpose ? payload : null;
 }
 
